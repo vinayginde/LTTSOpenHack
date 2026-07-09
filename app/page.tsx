@@ -83,15 +83,16 @@ export default function Home() {
   };
 
   const handleCaptureCoordinates = async () => {
-    if (!pdfFiles.length) {
-      return;
-    }
+    if (!pdfFiles.length) return;
 
     setCaptureRunning(true);
     setCaptureError(null);
     setCaptureMessage(null);
-    setProgressValue(10);
-    updateStatuses(pdfFiles, "processing");
+    setProgressValue(0);
+
+    const initialStatuses: Record<string, "pending" | "processing" | "complete" | "failed"> = {};
+    pdfFiles.forEach((f) => (initialStatuses[f.name] = "pending"));
+    setFileStatuses(initialStatuses);
 
     const formData = new FormData();
     pdfFiles.forEach((file) => formData.append("pdfFiles", file));
@@ -103,24 +104,58 @@ export default function Home() {
         body: formData,
       });
 
-      if (!response.ok) {
+      if (!response.ok || !response.body) {
         const data = await response.json().catch(() => ({}));
         throw new Error(data.error || "Capture failed");
       }
 
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "capture_coordinates.xlsx";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-      setProgressValue(100);
-      updateStatuses(pdfFiles, "complete");
-      setCaptureMessage("Capture complete. Download should begin shortly.");
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() ?? "";
+
+        for (const part of parts) {
+          if (!part.startsWith("data: ")) continue;
+          const event = JSON.parse(part.slice(6));
+
+          if (event.type === "file_done") {
+            const originalFile = pdfFiles.find(
+              (f) => f.name.replace(/[^a-zA-Z0-9._-]/g, "_") === event.file
+            );
+            const key = originalFile?.name ?? event.file;
+            setFileStatuses((prev) => ({ ...prev, [key]: "complete" }));
+            setProgressValue(Math.round((event.completed / event.total) * 100));
+          }
+
+          if (event.type === "error") {
+            throw new Error(event.error);
+          }
+
+          if (event.type === "complete") {
+            const bytes = Uint8Array.from(atob(event.file_b64), (c) => c.charCodeAt(0));
+            const blob = new Blob([bytes], {
+              type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = "capture_coordinates.xlsx";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+            setCaptureMessage("Capture complete. Download should begin shortly.");
+            setProgressValue(100);
+          }
+        }
+      }
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : "Capture failed");
       updateStatuses(pdfFiles, "failed");

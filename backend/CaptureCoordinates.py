@@ -297,7 +297,7 @@ def process_folder(input_folder: str, output_file: str, copilot_excel: Optional[
             print(f"Warning: failed to read Copilot Excel '{copilot_excel}': {exc}", file=sys.stderr)
             copilot_rows = []
 
-    for pdf_name in pdf_files:
+    for i, pdf_name in enumerate(pdf_files, start=1):
         pdf_path = os.path.join(input_folder, pdf_name)
         pid_no = os.path.splitext(pdf_name)[0]
 
@@ -307,6 +307,8 @@ def process_folder(input_folder: str, output_file: str, copilot_excel: Optional[
         if not copilot_rows:
             instrument_rows = extract_instrument_objects_from_pdf(pdf_path, pid_no, starting_id=1)
             output_rows.extend(instrument_rows)
+
+        print(f"PROGRESS:{pdf_name}:{i}:{len(pdf_files)}", flush=True)
 
     output_rows.extend(copilot_rows)
     output_rows = dedupe_rows(output_rows)
