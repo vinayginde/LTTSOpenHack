@@ -1,8 +1,10 @@
 "use client";
 
 import { ChangeEvent, useState } from "react";
+import { useRouter } from "next/navigation";
 
 export default function Home() {
+  const router = useRouter();
   const [pdfFiles, setPdfFiles] = useState<File[]>([]);
   const [excelFile, setExcelFile] = useState<File | null>(null);
   const [useExcel, setUseExcel] = useState(false);
@@ -17,6 +19,7 @@ export default function Home() {
   const [lastData, setLastData] = useState<any | null>(null);
   const [progressValue, setProgressValue] = useState(0);
   const [fileStatuses, setFileStatuses] = useState<Record<string, "pending" | "processing" | "complete" | "failed">>({});
+  const [capturedWorkbook, setCapturedWorkbook] = useState<Blob | null>(null);
 
   const updateStatuses = (
     files: File[],
@@ -88,6 +91,9 @@ export default function Home() {
       setResultSummary(`${data.count} rotated PDF${data.count === 1 ? "" : "s"} found.`);
       setMultiPageSummary(`${data.multi_page_count} PDF${data.multi_page_count === 1 ? "" : "s"} have more than one page.`);
       setScalingSummary(`${data.scaled_in_count} scaled in and ${data.scaled_out_count} scaled out.`);
+      setScalingSummary((prev) =>
+        prev ? `${prev}\n${data.non_searchable_count} non-searchable PDF${data.non_searchable_count === 1 ? "" : "s"}.` : `${data.non_searchable_count} non-searchable PDF${data.non_searchable_count === 1 ? "" : "s"}.`
+      );
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Processing failed");
       updateStatuses(pdfFiles, "failed");
@@ -162,6 +168,7 @@ export default function Home() {
             const blob = new Blob([bytes], {
               type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             });
+            setCapturedWorkbook(blob);
             const url = URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;
@@ -382,6 +389,30 @@ export default function Home() {
               </div>
             </div>
 
+            <button
+              type="button"
+              className="mt-6 w-full rounded-2xl bg-cyan-500 px-4 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              disabled={!isReady || isProcessing}
+              onClick={handleProcess}
+            >
+              {isProcessing
+                ? "Processing..."
+                : isReady
+                  ? "Start Analysis"
+                  : useExcel
+                    ? "Start Analysis"
+                    : "Start Analysis"}
+            </button>
+
+            <button
+              type="button"
+              className="mt-6 w-full rounded-2xl bg-violet-500 px-4 py-3 font-semibold text-slate-950 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              disabled={!isReady || captureRunning}
+              onClick={handleCaptureCoordinates}
+            >
+              {captureRunning ? "Capturing..." : "Capture coordinates"}
+            </button>
+
             {pdfFiles.length > 0 ? (
               <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
                 <div className="flex items-center justify-between text-sm text-slate-400">
@@ -422,23 +453,9 @@ export default function Home() {
                 </div>
               </div>
             ) : null}
-
-            <button
-              type="button"
-              className="mt-6 w-full rounded-2xl bg-cyan-500 px-4 py-3 font-semibold text-slate-950 transition hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-              disabled={!isReady || isProcessing}
-              onClick={handleProcess}
-            >
-              {isProcessing
-                ? "Processing..."
-                : isReady
-                  ? "Start Analysis"
-                  : useExcel
-                    ? "Start Analysis"
-                    : "Start Analysis"}
-            </button>
-
-            {resultSummary ? (
+          </aside>
+          <section className="rounded-3xl border border-slate-800 bg-slate-950/70 p-6 shadow-lg shadow-black/10">
+          {resultSummary ? (
               <p className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
                 {resultSummary}
               </p>
@@ -456,19 +473,23 @@ export default function Home() {
               </p>
             ) : null}
 
-            <button
-              type="button"
-              className="mt-6 w-full rounded-2xl bg-violet-500 px-4 py-3 font-semibold text-slate-950 transition hover:bg-violet-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
-              disabled={!isReady || captureRunning}
-              onClick={handleCaptureCoordinates}
-            >
-              {captureRunning ? "Capturing..." : "Capture coordinates"}
-            </button>
+            
 
             {captureMessage ? (
-              <p className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
-                {captureMessage}
-              </p>
+              <div className="mt-4 space-y-3">
+                <p className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+                  {captureMessage}
+                </p>
+                {capturedWorkbook ? (
+                  <button
+                    type="button"
+                    className="w-full rounded-2xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-3 font-semibold text-cyan-300 transition hover:bg-cyan-500/20"
+                    onClick={() => router.push("/processing/statistics")}
+                  >
+                    View statistics
+                  </button>
+                ) : null}
+              </div>
             ) : null}
 
             {captureError ? (
@@ -504,7 +525,7 @@ export default function Home() {
                 {errorMessage}
               </p>
             ) : null}
-          </aside>
+          </section>
         </section>
       </div>
     </main>

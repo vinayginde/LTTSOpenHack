@@ -45,15 +45,52 @@ export async function POST(request: NextRequest) {
 
         const outputPath = path.join(tempDir, "capture_coordinates.xlsx");
         const scriptPath = path.join(process.cwd(), "backend", "CaptureCoordinates.py");
+        const scalingScriptPath = path.join(process.cwd(), "backend", "CheckScaling.py");
         const pythonExecutable = path.join(
           process.cwd(),
           ".venv",
           process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
         );
 
+        let nonSearchableCount = 0;
+        try {
+          const scalingResult = await new Promise<{ non_searchable_count?: number }>((resolve, reject) => {
+            const scalingProcess = spawn(pythonExecutable, [scalingScriptPath, pdfDir], { cwd: process.cwd() });
+            let stdout = "";
+            let stderr = "";
+
+            scalingProcess.stdout.on("data", (data: Buffer) => {
+              stdout += data.toString();
+            });
+            scalingProcess.stderr.on("data", (data: Buffer) => {
+              stderr += data.toString();
+            });
+            scalingProcess.on("close", (code) => {
+              if (code !== 0) {
+                reject(new Error(stderr || "Scaling check failed"));
+                return;
+              }
+
+              try {
+                resolve(JSON.parse(stdout));
+              } catch {
+                reject(new Error("Unable to parse scaling output"));
+              }
+            });
+          });
+
+          nonSearchableCount = scalingResult.non_searchable_count ?? 0;
+        } catch {
+          nonSearchableCount = 0;
+        }
+
         const args = excelPath
           ? [scriptPath, pdfDir, outputPath, excelPath]
           : [scriptPath, pdfDir, outputPath];
+
+        if (nonSearchableCount > 0) {
+          args.push("--use-ocr");
+        }
 
         await new Promise<void>((resolve, reject) => {
           const py = spawn(pythonExecutable, args, { cwd: process.cwd() });
@@ -66,6 +103,7 @@ export async function POST(request: NextRequest) {
             stdoutBuffer = lines.pop() ?? ""; // keep incomplete line
 
             for (const line of lines) {
+              console.log("Python:", line);
               if (line.startsWith("PROGRESS:")) {
                 const [, file, completed, total] = line.split(":");
                 send({ type: "file_done", file, completed: +completed, total: +total });

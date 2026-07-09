@@ -28,6 +28,7 @@ def check_scaling(pdf_folder: str, _reference_filename: Optional[str] = None) ->
 
     scaled_in_count = 0
     scaled_out_count = 0
+    non_searchable_count = 0
     files: List[Dict[str, Any]] = []
 
     for file_name in sorted(os.listdir(pdf_folder)):
@@ -39,10 +40,14 @@ def check_scaling(pdf_folder: str, _reference_filename: Optional[str] = None) ->
         page = doc[0]
         width = float(page.rect.width)
         height = float(page.rect.height)
+        text = page.get_text("text") or ""
         doc.close()
 
         ratio = width / height if height else 0
         reference_ratio = reference_width / reference_height if reference_height else 0
+
+        if len(text) < 50:
+            non_searchable_count += 1
 
         if width < reference_width and height < reference_height:
             scaled_in_count += 1
@@ -67,6 +72,7 @@ def check_scaling(pdf_folder: str, _reference_filename: Optional[str] = None) ->
     return {
         "scaled_in_count": scaled_in_count,
         "scaled_out_count": scaled_out_count,
+        "non_searchable_count": non_searchable_count,
         "files": files,
         "reference": reference_filename,
     }

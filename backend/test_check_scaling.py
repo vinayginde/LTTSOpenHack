@@ -36,8 +36,32 @@ class CheckScalingTests(unittest.TestCase):
 
             self.assertEqual(result["scaled_in_count"], 1)
             self.assertEqual(result["scaled_out_count"], 1)
+            self.assertEqual(result["non_searchable_count"], 2)
             self.assertEqual(result["files"][0]["filename"], "scaled_in.pdf")
             self.assertEqual(result["files"][1]["filename"], "scaled_out.pdf")
+
+    def test_counts_non_searchable_pdfs_when_text_is_short(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            pdf_dir = tmp_path / "pdfs"
+            pdf_dir.mkdir()
+
+            reference_path = pdf_dir / "reference.pdf"
+            doc = fitz.open()
+            page = doc.new_page(width=500, height=700)
+            page.insert_text((50, 50), "Readable text")
+            doc.save(reference_path)
+            doc.close()
+
+            non_searchable_path = pdf_dir / "non_searchable.pdf"
+            doc = fitz.open()
+            doc.new_page(width=500, height=700)
+            doc.save(non_searchable_path)
+            doc.close()
+
+            result = check_scaling(str(pdf_dir), "reference.pdf")
+
+            self.assertEqual(result["non_searchable_count"], 1)
 
 
 if __name__ == "__main__":
