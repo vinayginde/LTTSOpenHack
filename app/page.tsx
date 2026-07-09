@@ -14,6 +14,19 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
   const [lastData, setLastData] = useState<any | null>(null);
+  const [progressValue, setProgressValue] = useState(0);
+  const [fileStatuses, setFileStatuses] = useState<Record<string, "pending" | "processing" | "complete" | "failed">>({});
+
+  const updateStatuses = (
+    files: File[],
+    status: "pending" | "processing" | "complete" | "failed"
+  ) => {
+    const statusMap: Record<string, "pending" | "processing" | "complete" | "failed"> = {};
+    files.forEach((file) => {
+      statusMap[file.name] = status;
+    });
+    setFileStatuses(statusMap);
+  };
 
   const handlePdfSelection = (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
@@ -36,6 +49,8 @@ export default function Home() {
     setResultSummary(null);
     setMultiPageSummary(null);
     setScalingSummary(null);
+    setProgressValue(10);
+    updateStatuses(pdfFiles, "processing");
 
     const formData = new FormData();
     pdfFiles.forEach((file) => formData.append("pdfFiles", file));
@@ -52,13 +67,16 @@ export default function Home() {
         throw new Error(data.error || "Processing failed");
       }
 
-        setLastData(data);
+      setLastData(data);
+      setProgressValue(100);
+      updateStatuses(pdfFiles, "complete");
 
       setResultSummary(`${data.count} rotated PDF${data.count === 1 ? "" : "s"} found.`);
       setMultiPageSummary(`${data.multi_page_count} PDF${data.multi_page_count === 1 ? "" : "s"} have more than one page.`);
       setScalingSummary(`${data.scaled_in_count} scaled in and ${data.scaled_out_count} scaled out.`);
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Processing failed");
+      updateStatuses(pdfFiles, "failed");
     } finally {
       setIsProcessing(false);
     }
@@ -72,6 +90,8 @@ export default function Home() {
     setCaptureRunning(true);
     setCaptureError(null);
     setCaptureMessage(null);
+    setProgressValue(10);
+    updateStatuses(pdfFiles, "processing");
 
     const formData = new FormData();
     pdfFiles.forEach((file) => formData.append("pdfFiles", file));
@@ -98,15 +118,22 @@ export default function Home() {
       link.remove();
       URL.revokeObjectURL(url);
 
+      setProgressValue(100);
+      updateStatuses(pdfFiles, "complete");
       setCaptureMessage("Capture complete. Download should begin shortly.");
     } catch (error) {
       setCaptureError(error instanceof Error ? error.message : "Capture failed");
+      updateStatuses(pdfFiles, "failed");
     } finally {
       setCaptureRunning(false);
     }
   };
 
   const isReady = pdfFiles.length > 0;
+
+  const progressLabel = isProcessing || captureRunning ? "Processing PDFs" : "Ready";
+  const progressMax = pdfFiles.length > 0 ? pdfFiles.length : 1;
+  const completedCount = Object.values(fileStatuses).filter((status) => status === "complete").length;
 
   function RotationChart({ total, rotated }: { total: number; rotated: number }) {
     const notRotated = Math.max(0, total - rotated);
@@ -276,6 +303,45 @@ export default function Home() {
                 </span>
               </div>
             </div>
+
+            {pdfFiles.length > 0 ? (
+              <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                <div className="flex items-center justify-between text-sm text-slate-400">
+                  <span>{progressLabel}</span>
+                  <span>{completedCount}/{pdfFiles.length}</span>
+                </div>
+                <progress
+                  className="mt-3 w-full h-3 rounded-full bg-slate-800 overflow-hidden"
+                  max={100}
+                  value={progressValue}
+                />
+                <ul className="mt-4 space-y-2">
+                  {pdfFiles.map((file) => {
+                    const status = fileStatuses[file.name] ?? "pending";
+                    const badgeClass =
+                      status === "complete"
+                        ? "bg-emerald-500/10 text-emerald-200"
+                        : status === "failed"
+                        ? "bg-rose-500/10 text-rose-200"
+                        : status === "processing"
+                        ? "bg-amber-500/10 text-amber-200"
+                        : "bg-slate-700 text-slate-300";
+
+                    return (
+                      <li
+                        key={file.name}
+                        className="flex items-center justify-between rounded-2xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-sm"
+                      >
+                        <span className="truncate text-slate-200">{file.name}</span>
+                        <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badgeClass}`}>
+                          {status}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : null}
 
             <button
               type="button"
