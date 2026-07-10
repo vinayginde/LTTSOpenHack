@@ -10,12 +10,15 @@ export default function Home() {
   const [useExcel, setUseExcel] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [captureRunning, setCaptureRunning] = useState(false);
+  const [backplotRunning, setBackplotRunning] = useState(false);
   const [resultSummary, setResultSummary] = useState<string | null>(null);
   const [multiPageSummary, setMultiPageSummary] = useState<string | null>(null);
   const [scalingSummary, setScalingSummary] = useState<string | null>(null);
   const [captureMessage, setCaptureMessage] = useState<string | null>(null);
+  const [backplotMessage, setBackplotMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [captureError, setCaptureError] = useState<string | null>(null);
+  const [backplotError, setBackplotError] = useState<string | null>(null);
   const [lastData, setLastData] = useState<any | null>(null);
   const [progressValue, setProgressValue] = useState(0);
   const [fileStatuses, setFileStatuses] = useState<Record<string, "pending" | "processing" | "complete" | "failed">>({});
@@ -190,9 +193,63 @@ export default function Home() {
     }
   };
 
+  const handleBackplot = async () => {
+    if (!pdfFiles.length) return;
+
+    const coordinateExcel = capturedWorkbook ?? excelFile;
+    if (!coordinateExcel) {
+      setBackplotError("Please capture coordinates or upload a coordinate Excel file before backplotting.");
+      return;
+    }
+
+    setBackplotRunning(true);
+    setBackplotError(null);
+    setBackplotMessage(null);
+    setProgressValue(0);
+    updateStatuses(pdfFiles, "processing");
+
+    const formData = new FormData();
+    pdfFiles.forEach((file) => formData.append("pdfFiles", file));
+    const coordinateExcelName = capturedWorkbook
+      ? "capture_coordinates.xlsx"
+      : excelFile?.name ?? "coordinates.xlsx";
+    formData.append("excelFile", coordinateExcel, coordinateExcelName);
+
+    try {
+      const response = await fetch("/api/backplot", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        throw new Error(data.error || "Backplot failed");
+      }
+
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "backplotted-pdfs.zip";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+
+      updateStatuses(pdfFiles, "complete");
+      setProgressValue(100);
+      setBackplotMessage("Backplot complete. Download should begin shortly.");
+    } catch (error) {
+      setBackplotError(error instanceof Error ? error.message : "Backplot failed");
+      updateStatuses(pdfFiles, "failed");
+    } finally {
+      setBackplotRunning(false);
+    }
+  };
+
   const isReady = pdfFiles.length > 0 && (!useExcel || !!excelFile);
 
-  const progressLabel = isProcessing || captureRunning ? "Processing PDFs" : "Ready";
+  const progressLabel = isProcessing || captureRunning || backplotRunning ? "Processing PDFs" : "Ready";
   const progressMax = pdfFiles.length > 0 ? pdfFiles.length : 1;
   const completedCount = Object.values(fileStatuses).filter((status) => status === "complete").length;
 
@@ -413,6 +470,15 @@ export default function Home() {
               {captureRunning ? "Capturing..." : "Capture coordinates"}
             </button>
 
+            <button
+              type="button"
+              className="mt-6 w-full rounded-2xl bg-emerald-500 px-4 py-3 font-semibold text-slate-950 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+              disabled={!pdfFiles.length || backplotRunning || (!capturedWorkbook && !excelFile)}
+              onClick={handleBackplot}
+            >
+              {backplotRunning ? "Backplotting..." : "Backplot PDFs"}
+            </button>
+
             {pdfFiles.length > 0 ? (
               <div className="mt-6 rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
                 <div className="flex items-center justify-between text-sm text-slate-400">
@@ -495,6 +561,18 @@ export default function Home() {
             {captureError ? (
               <p className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300">
                 {captureError}
+              </p>
+            ) : null}
+
+            {backplotMessage ? (
+              <p className="mt-4 rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-sm text-emerald-300">
+                {backplotMessage}
+              </p>
+            ) : null}
+
+            {backplotError ? (
+              <p className="mt-4 rounded-2xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-300">
+                {backplotError}
               </p>
             ) : null}
 
