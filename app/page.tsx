@@ -315,7 +315,7 @@ export default function Home() {
               Document Intake Dashboard
             </p>
             <h1 className="text-3xl font-semibold sm:text-4xl">
-              Upload your PDF folder and matching Excel sheet in one place.
+              Drawing Intelligence - AI-Powered Tags Extraction & Efforts Prediction.
             </h1>
             <p className="mt-4 text-base leading-7 text-slate-400">
               Drop in a directory of PDF files and the spreadsheet that maps the

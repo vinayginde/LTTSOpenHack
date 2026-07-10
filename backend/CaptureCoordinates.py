@@ -1,9 +1,12 @@
 import argparse
+import json
 import os
 import re
 import sys
 import tempfile
 from typing import Dict, List, Optional, Set, Tuple
+from urllib import request as urllib_request
+from urllib.error import HTTPError, URLError
 
 import fitz
 import pandas as pd
@@ -17,6 +20,14 @@ except Exception:  # pragma: no cover - optional dependency
 
 RESTRICTED_CONTENTS = ['"', '-', '.', '°', '/', '\\', ',', '(', ')']
 INSTRUMENT_CANDIDATE_PATTERN = r'^[A-Z]\d+[A-Z]\d+$'
+AZURE_OPENAI_API_KEY = "09b491b9a1fd4e19ae02a890d1b24473"
+AZURE_OPENAI_CHAT_COMPLETIONS_URL = (
+    "https://apim-foundry-prod-ltts.azure-api.net/gpt5-mini/deployments/"
+    "gpt-5-mini/chat/completions?api-version=2024-12-01-preview"
+)
+NOISE_SPECIAL_PATTERN = re.compile(r"[@#%~*`^{}\[\]<>|]+")
+ONLY_PUNCTUATION_PATTERN = re.compile(r"^[\W_]+$")
+GPT_CLEANING_BATCH_SIZE = 80
 
 
 def classify_text(text: str) -> Optional[str]:
@@ -374,7 +385,199 @@ def dedupe_rows(rows: List[Dict[str, object]]) -> List[Dict[str, object]]:
     return unique
 
 
-def process_folder(input_folder: str, output_file: str, copilot_excel: Optional[str] = None, use_ocr: bool = False) -> None:
+def get_text_column(df: pd.DataFrame) -> str:
+    for column in df.columns:
+        if str(column).strip().lower() == "text":
+            return column
+    raise ValueError('Excel output is missing a "Text" or "TEXT" column.')
+
+
+def is_local_noise_text(value: object) -> bool:
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null", "no text detected"}:
+        return True
+    if NOISE_SPECIAL_PATTERN.search(text):
+        return True
+    if ONLY_PUNCTUATION_PATTERN.fullmatch(text):
+        return True
+    return False
+
+
+def extract_response_text(response_json: Dict[str, object]) -> str:
+    choices = response_json.get("choices", [])
+    if isinstance(choices, list) and choices:
+        first_choice = choices[0]
+        if isinstance(first_choice, dict):
+            message = first_choice.get("message", {})
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, str):
+                    return content
+
+    direct_text = response_json.get("output_text")
+    if isinstance(direct_text, str):
+        return direct_text
+
+    parts: List[str] = []
+    for output_item in response_json.get("output", []):
+        if not isinstance(output_item, dict):
+            continue
+        for content_item in output_item.get("content", []):
+            if not isinstance(content_item, dict):
+                continue
+            text = content_item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+
+    return "\n".join(parts)
+
+
+def parse_json_object(raw_text: str) -> Dict[str, object]:
+    cleaned = raw_text.strip()
+    if cleaned.startswith("```"):
+        cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise
+        parsed = json.loads(match.group(0))
+
+    if not isinstance(parsed, dict):
+        raise ValueError("GPT cleaner returned JSON that is not an object.")
+    return parsed
+
+
+def get_azure_openai_api_key() -> str:
+    return AZURE_OPENAI_API_KEY.strip() or os.getenv("AZURE_OPENAI_API_KEY", "").strip()
+
+
+def call_gpt_cleaner(batch: List[Dict[str, object]]) -> Set[int]:
+    api_key = get_azure_openai_api_key()
+    if not api_key:
+        print("Warning: Azure OpenAI API key not configured; GPT cleaning step skipped.", file=sys.stderr)
+        return set()
+
+    prompt_rows = [
+        {
+            "row_id": row["row_id"],
+            "text": row["text"],
+            "tag_type": row.get("tag_type", ""),
+        }
+        for row in batch
+    ]
+
+    payload = {
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You clean coordinate-extraction rows for P&ID drawings. "
+                    "Return strict JSON only. Remove rows when the text is an English dictionary "
+                    "word or ordinary English phrase, random OCR noise, standalone punctuation, "
+                    "or contains unnecessary special characters such as @, #, %, ~, or *. "
+                    "Keep likely engineering tags, equipment identifiers, pipe runs, and instrument "
+                    "codes, especially values containing meaningful letters with digits, hyphens, "
+                    "slashes, or quotation marks."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "Classify these rows. Return exactly this shape: "
+                    '{"remove_row_ids":[1,2],"keep_row_ids":[3]}. '
+                    f"Rows: {json.dumps(prompt_rows, ensure_ascii=True)}"
+                ),
+            },
+        ],
+    }
+
+    headers = {
+        "api-key": api_key,
+        "Content-Type": "application/json",
+    }
+
+    req = urllib_request.Request(
+        AZURE_OPENAI_CHAT_COMPLETIONS_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+
+    try:
+        with urllib_request.urlopen(req, timeout=120) as response:
+            response_data = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        error_body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"Azure OpenAI cleaner failed: HTTP {exc.code}: {error_body}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Azure OpenAI cleaner failed: {exc}") from exc
+
+    response_text = extract_response_text(response_data)
+    parsed = parse_json_object(response_text)
+    remove_ids = parsed.get("remove_row_ids", [])
+    if not isinstance(remove_ids, list):
+        raise ValueError("GPT cleaner response is missing remove_row_ids list.")
+
+    return {int(row_id) for row_id in remove_ids}
+
+
+def clean_excel_rows_with_gpt(df: pd.DataFrame) -> pd.DataFrame:
+    text_column = get_text_column(df)
+    tag_column = next((col for col in df.columns if str(col).strip().lower() == "tag type"), None)
+
+    local_keep_mask = ~df[text_column].apply(is_local_noise_text)
+    locally_removed = int((~local_keep_mask).sum())
+    filtered_df = df.loc[local_keep_mask].copy()
+
+    rows_for_gpt: List[Dict[str, object]] = []
+    for row_id, (_, row) in enumerate(filtered_df.iterrows(), start=1):
+        rows_for_gpt.append(
+            {
+                "row_id": row_id,
+                "text": str(row[text_column]).strip(),
+                "tag_type": str(row[tag_column]).strip() if tag_column else "",
+            }
+        )
+
+    gpt_remove_ids: Set[int] = set()
+    if get_azure_openai_api_key():
+        for start in range(0, len(rows_for_gpt), GPT_CLEANING_BATCH_SIZE):
+            batch = rows_for_gpt[start:start + GPT_CLEANING_BATCH_SIZE]
+            if not batch:
+                continue
+            gpt_remove_ids.update(call_gpt_cleaner(batch))
+    else:
+        print("Warning: Azure OpenAI API key not configured; GPT cleaning step skipped.", file=sys.stderr)
+
+    if gpt_remove_ids:
+        row_id_by_index = {
+            index: row["row_id"]
+            for index, row in zip(filtered_df.index, rows_for_gpt)
+        }
+        gpt_keep_mask = filtered_df.index.to_series().map(
+            lambda index: row_id_by_index[index] not in gpt_remove_ids
+        )
+        filtered_df = filtered_df.loc[gpt_keep_mask].copy()
+
+    print(
+        f"Cleaning removed {locally_removed + len(gpt_remove_ids)} rows "
+        f"({locally_removed} local, {len(gpt_remove_ids)} GPT).",
+        flush=True,
+    )
+    return filtered_df
+
+
+def process_folder(
+    input_folder: str,
+    output_file: str,
+    copilot_excel: Optional[str] = None,
+    use_ocr: bool = False,
+    clean_with_gpt: bool = True,
+) -> None:
     """Process all PDFs in the input folder and export results to Excel."""
     if not os.path.isdir(input_folder):
         raise FileNotFoundError(f"Input folder not found: {input_folder}")
@@ -406,6 +609,7 @@ def process_folder(input_folder: str, output_file: str, copilot_excel: Optional[
         )
         output_rows.extend(generic_rows)
 
+        instrument_rows: List[Dict[str, object]] = []
         if not copilot_rows:
             instrument_rows = extract_instrument_objects_from_pdf(pdf_path, pid_no, starting_id=1)
             output_rows.extend(instrument_rows)
@@ -445,10 +649,13 @@ def process_folder(input_folder: str, output_file: str, copilot_excel: Optional[
         "Page No.",
     ])
 
+    if clean_with_gpt:
+        df = clean_excel_rows_with_gpt(df)
+
     with pd.ExcelWriter(output_file, engine="openpyxl") as writer:
         df.to_excel(writer, index=False, sheet_name="capture_coordinates")
 
-    print(f"Exported {len(output_rows)} rows to {output_file}")
+    print(f"Exported {len(df)} rows to {output_file}")
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -476,6 +683,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="Use Tesseract OCR for coordinate extraction when PDFs are non-searchable.",
     )
+    parser.add_argument(
+        "--skip-gpt-cleaning",
+        "--skip-openai-cleaning",
+        dest="skip_gpt_cleaning",
+        action="store_true",
+        help="Skip GPT cleaning of the generated Excel rows.",
+    )
     return parser.parse_args(argv)
 
 
@@ -488,6 +702,7 @@ def main() -> None:
             args.output_file,
             copilot_excel=args.copilot_excel,
             use_ocr=args.use_ocr,
+            clean_with_gpt=not args.skip_gpt_cleaning,
         )
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
